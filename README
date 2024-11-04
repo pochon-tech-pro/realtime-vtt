@@ -1,0 +1,11 @@
+#Container create
+docker-compose up -d --build
+
+#Container delete
+docker system prune -a
+
+#troubles shoot
+docker desktop not work : 「WSL 2 installation is incomplete.」
+    https://qiita.com/TK_WebSE/items/87f4c21e9a4eb386a8b3
+
+    

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>音声文字起こしと危険検知システム</title>
+        <style>
+            #output {
+                width: 100%;
+                height: 300px;
+                border: 1px solid #ccc;
+                margin-top: 20px;
+                padding: 10px;
+                overflow-y: auto;
+            }
+            .status {
+                margin-top: 10px;
+                color: #666;
+            }
+            .error {
+                color: red;
+            }
+            .danger-text {
+                color: red;
+                font-weight: bold;
+                background-color: #ffe6e6;
+                padding: 5px;
+                border-radius: 3px;
+            }
+            .warning-box {
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background-color: #ff4444;
+                color: white;
+                padding: 15px;
+                border-radius: 5px;
+                display: none;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+                z-index: 1000;
+            }
+            .detected-words {
+                margin-top: 5px;
+                font-size: 0.9em;
+            }
+        </style>
+    </head>
+    <body>
+        <div>
+            <button id="startButton">録音開始</button>
+            <button id="stopButton" disabled>録音停止</button>
+            <div class="status" id="status"></div>
+        </div>
+        <div id="output"></div>
+        <div id="warningBox" class="warning-box">
+            <div>⚠️ 危険な表現を検知しました</div>
+            <div class="detected-words" id="detectedWords"></div>
+        </div>
+    
+        <script>    
+            class WAVRecorder {
+                constructor() {
+                    this.chunks = [];
+                    this.audioContext = null;
+                    this.stream = null;
+                    this.recorder = null;
+                    this.audioInput = null;
+                    this.sampleRate = 16000;
+                }
+    
+                async start() {
+                    try {
+                        this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        this.audioContext = new AudioContext({ sampleRate: this.sampleRate });
+                        this.audioInput = this.audioContext.createMediaStreamSource(this.stream);
+                        this.recorder = this.audioContext.createScriptProcessor(4096, 1, 1);
+                        this.chunks = [];
+    
+                        this.recorder.onaudioprocess = (e) => {
+                            const channel = e.inputBuffer.getChannelData(0);
+                            this.chunks.push(new Float32Array(channel));
+                        };
+    
+                        this.audioInput.connect(this.recorder);
+                        this.recorder.connect(this.audioContext.destination);
+                    } catch (error) {
+                        throw error;
+                    }
+                }
+    
+                stop() {
+                    if (this.recorder && this.audioInput) {
+                        this.recorder.disconnect();
+                        this.audioInput.disconnect();
+                    }
+                    if (this.stream) {
+                        this.stream.getTracks().forEach(track => track.stop());
+                    }
+                    return this._exportWAV();
+                }
+    
+                _exportWAV() {
+                    const bufferLength = this.chunks.reduce((length, chunk) => length + chunk.length, 0);
+                    const audioBuffer = new Float32Array(bufferLength);
+                    let offset = 0;
+    
+                    for (const chunk of this.chunks) {
+                        audioBuffer.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+    
+                    const wavBuffer = this._createWAVFile(audioBuffer);
+                    return new Blob([wavBuffer], { type: 'audio/wav' });
+                }
+    
+                _createWAVFile(samples) {
+                    const buffer = new ArrayBuffer(44 + samples.length * 2);
+                    const view = new DataView(buffer);
+    
+                    // WAVヘッダーの書き込み
+                    this._writeString(view, 0, 'RIFF');
+                    view.setUint32(4, 36 + samples.length * 2, true);
+                    this._writeString(view, 8, 'WAVE');
+                    this._writeString(view, 12, 'fmt ');
+                    view.setUint32(16, 16, true);
+                    view.setUint16(20, 1, true);
+                    view.setUint16(22, 1, true);
+                    view.setUint32(24, this.sampleRate, true);
+                    view.setUint32(28, this.sampleRate * 2, true);
+                    view.setUint16(32, 2, true);
+                    view.setUint16(34, 16, true);
+                    this._writeString(view, 36, 'data');
+                    view.setUint32(40, samples.length * 2, true);
+    
+                    // 音声データの書き込み
+                    const volume = 1;
+                    let offset = 44;
+                    for (let i = 0; i < samples.length; i++) {
+                        view.setInt16(offset, samples[i] * 0x7FFF * volume, true);
+                        offset += 2;
+                    }
+    
+                    return buffer;
+                }
+    
+                _writeString(view, offset, string) {
+                    for (let i = 0; i < string.length; i++) {
+                        view.setUint8(offset + i, string.charCodeAt(i));
+                    }
+                }
+            }
+    
+
+            const startButton = document.getElementById('startButton');
+            const stopButton = document.getElementById('stopButton');
+            const output = document.getElementById('output');
+            const status = document.getElementById('status');
+            const warningBox = document.getElementById('warningBox');
+            const detectedWords = document.getElementById('detectedWords');
+            let ws;
+            let recorder;
+            let recordingInterval;
+            let warningAudio;
+
+            // 危険ワードのリスト
+            const dangerWords = {
+                highRisk: [
+                    'ご視聴ありがとうございました', '死ね', '殴る', '刺す', '首を絞める',
+                    '血', '包丁', 'ナイフ', '暴力', '虐待',
+                    '自殺', '死にたい', '痛い', '叩く'
+                ],
+                mediumRisk: [
+                    '怖い', '嫌い', '邪魔', 'うるさい', '黙れ',
+                    '消えろ', '邪魔', '殺害', '暴行', '脅す',
+                    '叱る', '怒る', '泣く', '謝れ'
+                ]
+            };
+
+            // 警告音の初期化
+            function initWarningSound() {
+                warningAudio = new Audio('assets/warning.mp3');
+                
+                // 音声ファイルのプリロード
+                warningAudio.load();
+                
+                // エラーハンドリング
+                warningAudio.onerror = (e) => {
+                    console.error('Warning sound loading error:', e);
+                    status.textContent = '警告音の読み込みに失敗しました';
+                    status.className = 'error';
+                };
+
+                // 音量設定
+                warningAudio.volume = 0.8; // 0.0から1.0の範囲で設定可能
+            }
+            
+            // 危険ワードの検知
+            function detectDangerWords(text) {
+                const detectedHighRisk = dangerWords.highRisk.filter(word => text.includes(word));
+                const detectedMediumRisk = dangerWords.mediumRisk.filter(word => text.includes(word));
+                
+                if (detectedHighRisk.length > 0 || detectedMediumRisk.length > 0) {
+                    warningAudio.play();
+                    warningBox.style.display = 'block';
+                    detectedWords.innerHTML = [
+                        ...detectedHighRisk.map(word => `<span style="color: #ff0000">${word}</span>`),
+                        ...detectedMediumRisk.map(word => `<span style="color: #ff6666">${word}</span>`)
+                    ].join(', ');
+                    
+                    setTimeout(() => {
+                        warningBox.style.display = 'none';
+                    }, 5000);
+                    
+                    return {
+                        text: text,
+                        highlightedText: text.replace(
+                            new RegExp(`(${[...detectedHighRisk, ...detectedMediumRisk].join('|')})`, 'g'),
+                            '<span class="danger-text">$1</span>'
+                        )
+                    };
+                }
+                
+                return { text: text, highlightedText: text };
+            }
+
+            function initWebSocket() {
+                ws = new WebSocket('ws://localhost:8765');
+                
+                ws.onmessage = (event) => {
+                    if (event.data.startsWith('Error:')) {
+                        const p = document.createElement('p');
+                        p.className = 'error';
+                        p.textContent = event.data;
+                        output.appendChild(p);
+                    } else if (event.data.trim()) {
+                        const result = detectDangerWords(event.data);
+                        const p = document.createElement('p');
+                        p.innerHTML = result.highlightedText;
+                        output.appendChild(p);
+                    }
+                    output.scrollTop = output.scrollHeight;
+                };
+
+                ws.onerror = (error) => {
+                    status.textContent = 'WebSocket接続エラー';
+                    status.className = 'error';
+                };
+            }
+    
+            async function sendAudioChunk() {
+                if (recorder && ws && ws.readyState === WebSocket.OPEN) {
+                    const wavBlob = await recorder.stop();
+                    ws.send(wavBlob);
+                    
+                    // 新しい録音セッションを開始
+                    await recorder.start();
+                }
+            }
+    
+            startButton.onclick = async () => {
+            try {
+                initWarningSound();
+                recorder = new WAVRecorder();
+                await recorder.start();
+                initWebSocket();
+
+                recordingInterval = setInterval(sendAudioChunk, 6000);
+
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                status.textContent = '録音中...';
+                status.className = 'status';
+
+            } catch (err) {
+                console.error('Error:', err);
+                status.textContent = 'マイクへのアクセスに失敗しました';
+                status.className = 'error';
+            }
+        };
+
+        stopButton.onclick = async () => {
+            clearInterval(recordingInterval);
+            
+            if (recorder) {
+                const finalChunk = await recorder.stop();
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(finalChunk);
+                    ws.close();
+                }
+                recorder = null;
+            }
+
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            status.textContent = '停止中';
+            status.className = 'status';
+        };
+    </script>
+    </body>
+    </html>
